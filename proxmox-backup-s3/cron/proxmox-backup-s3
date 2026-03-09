@@ -1,0 +1,13 @@
+# Proxmox VM Backup to S3 — Weekly (Sunday at 2:00 AM)
+# Copy to /etc/cron.d/proxmox-backup-s3
+#
+# Schedule examples:
+#   0 2 * * 0    Every Sunday at 2 AM
+#   0 0 * * 6    Every Saturday at midnight
+#   0 3 * * *    Every day at 3 AM
+#   0 1 1,15 * * 1st & 15th of month at 1 AM
+
+SHELL=/bin/bash
+MAILTO=root
+
+0 2 * * 0   root   /usr/local/bin/proxmox-backup-s3-cron.sh >> /var/log/proxmox-backup-s3/cron.log 2>&1

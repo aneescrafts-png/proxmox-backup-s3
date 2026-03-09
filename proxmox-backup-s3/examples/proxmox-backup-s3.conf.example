@@ -1,0 +1,31 @@
+# ──────────────────────────────────────────────────────────────
+# Proxmox Full Backup to S3 — Configuration
+# Copy to /etc/proxmox-backup-s3.conf and edit values below
+# ──────────────────────────────────────────────────────────────
+
+# S3 destination
+S3_BUCKET="s3://your-bucket-name"
+S3_PREFIX="backups/$(hostname)/$(date +%Y/%m/%d)"
+
+# Backup settings
+BACKUP_DIR="/var/tmp/proxmox-backups"
+BACKUP_MODE="snapshot"          # snapshot (no downtime) | suspend | stop
+COMPRESS="zstd"                 # zstd | gzip | lzo | none
+STORAGE=""                      # Proxmox storage ID (leave empty to use BACKUP_DIR)
+
+# Upload / Cleanup
+KEEP_LOCAL="false"              # true = keep local copy after S3 upload
+
+# Logging
+LOG_DIR="/var/log/proxmox-backup-s3"
+LOG_RETENTION_DAYS=30
+
+# Specific VMIDs to back up (space-separated)
+# Leave empty to back up ALL running VMs/CTs
+# Example: VMIDS="100 101 205"
+VMIDS=""
+
+# AWS credentials (optional — prefer 'aws configure' or IAM roles)
+# AWS_ACCESS_KEY_ID=""
+# AWS_SECRET_ACCESS_KEY=""
+# AWS_DEFAULT_REGION="us-east-1"
