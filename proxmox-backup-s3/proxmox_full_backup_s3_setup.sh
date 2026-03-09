@@ -48,7 +48,7 @@ echo ""
 
 # ─────────────────────────── Step 1: AWS CLI ──────────────────────────
 
-header "Step 1/7: AWS CLI"
+header "Step 1/8: AWS CLI"
 
 if command -v aws &>/dev/null; then
     log "AWS CLI installed ($(aws --version 2>&1 | head -1))"
@@ -59,42 +59,81 @@ else
     log "AWS CLI installed"
 fi
 
-# ─────────────────────────── Step 2: AWS Credentials ──────────────────
+# ─────────────────────────── Step 2: S3 Provider ─────────────────────
 
-header "Step 2/7: AWS Credentials"
+header "Step 2/8: S3 Provider"
 
-if aws sts get-caller-identity &>/dev/null 2>&1; then
-    log "AWS credentials configured ($(aws sts get-caller-identity --query Arn --output text 2>/dev/null))"
+info "This script supports AWS S3 and S3-compatible providers."
+info "Examples: Wasabi, MinIO, Backblaze B2, Cloudflare R2, IDrive e2"
+echo ""
+ask "S3 endpoint URL (Enter for AWS, or e.g. https://s3.wasabisys.com):"; read -r S3_ENDPOINT
+S3_ENDPOINT="${S3_ENDPOINT:-}"
+
+# Build endpoint args for all subsequent aws commands
+S3_ENDPOINT_ARGS=()
+[[ -n "$S3_ENDPOINT" ]] && S3_ENDPOINT_ARGS=(--endpoint-url "$S3_ENDPOINT")
+
+aws_s3() { aws s3 "${S3_ENDPOINT_ARGS[@]}" "$@"; }
+
+if [[ -n "$S3_ENDPOINT" ]]; then
+    log "Using S3-compatible endpoint: ${S3_ENDPOINT}"
+else
+    log "Using AWS S3"
+fi
+
+# ─────────────────────────── Step 3: Credentials ─────────────────────
+
+header "Step 3/8: S3 Credentials"
+
+# For S3-compatible providers, sts get-caller-identity won't work.
+# Test credentials by listing buckets instead.
+test_credentials() {
+    aws_s3 ls &>/dev/null 2>&1
+}
+
+if test_credentials; then
+    log "S3 credentials are working"
     ask "Keep existing credentials? [Y/n]:"; read -r KC
     [[ "${KC,,}" == "n" ]] && aws configure
 else
-    warn "No AWS credentials found."
-    info "Need an IAM user with S3 access — create one in AWS Console → IAM"
+    warn "No working S3 credentials found."
+    if [[ -n "$S3_ENDPOINT" ]]; then
+        info "Enter your Access Key and Secret Key from your S3 provider."
+        info "Region can usually be left as-is or set to your provider's region."
+    else
+        info "Need an IAM user with S3 access — create one in AWS Console → IAM"
+    fi
     echo ""; aws configure; echo ""
-    aws sts get-caller-identity &>/dev/null 2>&1 || fail "Invalid credentials"
+    test_credentials || fail "Credentials failed — cannot list buckets"
     log "Credentials verified"
 fi
 
-# ─────────────────────────── Step 3: S3 Bucket ───────────────────────
+# ─────────────────────────── Step 4: S3 Bucket ───────────────────────
 
-header "Step 3/7: S3 Bucket"
+header "Step 4/8: S3 Bucket"
 
 DEFAULT_BUCKET="proxmox-$(hostname | tr '[:upper:]' '[:lower:]')-$(date +%s | tail -c 6)"
 ask "S3 bucket name [${DEFAULT_BUCKET}]:"; read -r S3_BUCKET_NAME
 S3_BUCKET_NAME="${S3_BUCKET_NAME:-$DEFAULT_BUCKET}"
 S3_BUCKET_NAME="${S3_BUCKET_NAME#s3://}"
 
-if aws s3 ls "s3://${S3_BUCKET_NAME}" &>/dev/null 2>&1; then
+if aws_s3 ls "s3://${S3_BUCKET_NAME}" &>/dev/null 2>&1; then
     log "Bucket s3://${S3_BUCKET_NAME} exists"
 else
-    AWS_REGION=$(aws configure get region 2>/dev/null || echo "us-east-1")
-    aws s3 mb "s3://${S3_BUCKET_NAME}" ${AWS_REGION:+--region "$AWS_REGION"} 2>/dev/null \
-        && log "Bucket created" || fail "Cannot create bucket"
+    if [[ -n "$S3_ENDPOINT" ]]; then
+        # S3-compatible providers: some don't support --region or handle it differently
+        aws_s3 mb "s3://${S3_BUCKET_NAME}" 2>/dev/null \
+            && log "Bucket created" || fail "Cannot create bucket — create it manually in your provider's console"
+    else
+        AWS_REGION=$(aws configure get region 2>/dev/null || echo "us-east-1")
+        aws s3 mb "s3://${S3_BUCKET_NAME}" ${AWS_REGION:+--region "$AWS_REGION"} 2>/dev/null \
+            && log "Bucket created" || fail "Cannot create bucket"
+    fi
 fi
 
 # ─────────────────────────── Step 4: Backup Settings ──────────────────
 
-header "Step 4/7: Backup Settings"
+header "Step 5/8: Backup Settings"
 
 ask "Backup mode — snapshot / suspend / stop [snapshot]:"; read -r BACKUP_MODE
 BACKUP_MODE="${BACKUP_MODE:-snapshot}"
@@ -109,7 +148,7 @@ ask "Keep local backups after S3 upload? [y/N]:"; read -r KL
 
 # ─────────────────────────── Step 5: Install Backup Script ────────────
 
-header "Step 5/7: Installing Full Backup Script"
+header "Step 6/8: Installing Full Backup Script"
 
 BACKUP_SCRIPT="/usr/local/bin/proxmox_backup_s3.sh"
 
@@ -119,6 +158,7 @@ cat > "$BACKUP_SCRIPT" << 'MAINSCRIPT'
 # proxmox_backup_s3.sh
 # Full backup: VMs + host network config + firewall + NAT + DNS + SDN
 # Process: backup VM → upload → next VM → then upload host network bundle
+# Supports AWS S3 and S3-compatible providers (Wasabi, MinIO, Backblaze B2, etc.)
 
 set -euo pipefail
 
@@ -128,6 +168,7 @@ CONFIG_FILE="/etc/proxmox-backup-s3.conf"
 
 # ─── Defaults ───
 S3_BUCKET="${S3_BUCKET:-s3://my-proxmox-backups}"
+S3_ENDPOINT="${S3_ENDPOINT:-}"  # e.g. https://s3.wasabisys.com, https://s3.us-east-1.wasabisys.com
 S3_PREFIX="${S3_PREFIX:-backups/$(hostname)/$(date +%Y/%m/%d)}"
 BACKUP_DIR="${BACKUP_DIR:-/var/tmp/proxmox-backups}"
 BACKUP_MODE="${BACKUP_MODE:-snapshot}"
@@ -148,12 +189,18 @@ ok()   { log "✅  $*"; }
 warn() { log "⚠️  $*"; }
 fail() { log "❌  $*"; }
 
+# ─── S3 endpoint helper ───
+S3_ENDPOINT_ARGS=()
+[[ -n "$S3_ENDPOINT" ]] && S3_ENDPOINT_ARGS=(--endpoint-url "$S3_ENDPOINT")
+
+aws_s3() { aws s3 "${S3_ENDPOINT_ARGS[@]}" "$@"; }
+
 # ─── Preflight ───
 for cmd in vzdump pvesh aws; do
     command -v "$cmd" &>/dev/null || { fail "Missing: $cmd"; exit 1; }
 done
-aws s3 ls "${S3_BUCKET}" &>/dev/null || { fail "Cannot access ${S3_BUCKET}"; exit 1; }
-ok "S3 access verified"
+aws_s3 ls "${S3_BUCKET}" &>/dev/null || { fail "Cannot access ${S3_BUCKET}"; exit 1; }
+ok "S3 access verified${S3_ENDPOINT:+ (endpoint: $S3_ENDPOINT)}"
 
 # Clean old logs
 [[ "$LOG_RETENTION_DAYS" -gt 0 ]] && \
@@ -307,11 +354,11 @@ backup_host_network() {
     # Upload to S3
     local s3_dest="${S3_BUCKET}/${S3_PREFIX}/proxmox-host-config-${TIMESTAMP}.tar.gz"
     log "Uploading host config → ${s3_dest}"
-    aws s3 cp "$BUNDLE_FILE" "$s3_dest" --only-show-errors
+    aws_s3 cp "$BUNDLE_FILE" "$s3_dest" --only-show-errors
     ok "Host config uploaded to S3"
 
     # Verify
-    if aws s3 ls "$s3_dest" &>/dev/null; then
+    if aws_s3 ls "$s3_dest" &>/dev/null; then
         ok "S3 verify passed for host config"
     else
         warn "S3 verify failed for host config — keeping local"
@@ -640,7 +687,7 @@ upload_to_s3() {
     local s3_dest="${S3_BUCKET}/${S3_PREFIX}/${filename}"
     log "Uploading ${filename} (${filesize}) → ${s3_dest}"
     local start=$SECONDS
-    aws s3 cp "$filepath" "$s3_dest" --only-show-errors --expected-size "$(stat -c%s "$filepath")"
+    aws_s3 cp "$filepath" "$s3_dest" --only-show-errors --expected-size "$(stat -c%s "$filepath")"
     ok "Upload done for VMID ${vmid} in $(( SECONDS - start ))s"
 }
 
@@ -675,7 +722,7 @@ process_vm() {
     fi
 
     local fname; fname=$(basename "$backup_file")
-    if aws s3 ls "${S3_BUCKET}/${S3_PREFIX}/${fname}" &>/dev/null; then
+    if aws_s3 ls "${S3_BUCKET}/${S3_PREFIX}/${fname}" &>/dev/null; then
         ok "S3 verify OK for VMID ${vmid}"
     else
         warn "S3 verify FAILED for VMID ${vmid}"; FAILED+=("$vmid (verify)"); return 1
@@ -739,7 +786,7 @@ main() {
     log "════════════════════════════════════════════"
     log ""
     log "  TO RESTORE ON NEW PROXMOX:"
-    log "  1. aws s3 cp ${S3_BUCKET}/${S3_PREFIX}/ /tmp/restore/ --recursive"
+    log "  1. aws s3${S3_ENDPOINT:+ --endpoint-url $S3_ENDPOINT} cp ${S3_BUCKET}/${S3_PREFIX}/ /tmp/restore/ --recursive"
     log "  2. tar xzf /tmp/restore/proxmox-host-config-*.tar.gz -C /tmp/"
     log "  3. sudo bash /tmp/network-config-*/RESTORE.sh"
     log "  4. qmrestore /tmp/restore/vzdump-qemu-VMID-*.vma.zst VMID"
@@ -757,13 +804,14 @@ log "Backup script installed → ${BACKUP_SCRIPT}"
 
 # ─────────────────────────── Step 6: Config File ──────────────────────
 
-header "Step 6/7: Writing Configuration"
+header "Step 7/8: Writing Configuration"
 
 CONFIG_FILE="/etc/proxmox-backup-s3.conf"
 cat > "$CONFIG_FILE" <<EOF
 # Proxmox Full Backup to S3 — Config (generated $(date))
 
 S3_BUCKET="s3://${S3_BUCKET_NAME}"
+S3_ENDPOINT="${S3_ENDPOINT}"
 S3_PREFIX="backups/\$(hostname)/\$(date +%Y/%m/%d)"
 
 BACKUP_DIR="/var/tmp/proxmox-backups"
@@ -783,7 +831,7 @@ log "Config → ${CONFIG_FILE}"
 
 # ─────────────────────────── Step 7: Cron ─────────────────────────────
 
-header "Step 7/7: Weekly Cron Job"
+header "Step 8/8: Weekly Cron Job"
 
 ask "Day? 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat [0]:"; read -r CDAY
 CDAY="${CDAY:-0}"

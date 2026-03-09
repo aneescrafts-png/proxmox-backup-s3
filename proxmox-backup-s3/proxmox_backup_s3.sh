@@ -12,6 +12,7 @@ CONFIG_FILE="/etc/proxmox-backup-s3.conf"
 
 # ─── Defaults ───
 S3_BUCKET="${S3_BUCKET:-s3://my-proxmox-backups}"
+S3_ENDPOINT="${S3_ENDPOINT:-}"  # e.g. https://s3.wasabisys.com, https://s3.us-east-1.wasabisys.com
 S3_PREFIX="${S3_PREFIX:-backups/$(hostname)/$(date +%Y/%m/%d)}"
 BACKUP_DIR="${BACKUP_DIR:-/var/tmp/proxmox-backups}"
 BACKUP_MODE="${BACKUP_MODE:-snapshot}"
@@ -32,12 +33,19 @@ ok()   { log "✅  $*"; }
 warn() { log "⚠️  $*"; }
 fail() { log "❌  $*"; }
 
+# ─── S3 endpoint helper ───
+# Builds endpoint args for S3-compatible providers (Wasabi, MinIO, Backblaze B2, etc.)
+S3_ENDPOINT_ARGS=()
+[[ -n "$S3_ENDPOINT" ]] && S3_ENDPOINT_ARGS=(--endpoint-url "$S3_ENDPOINT")
+
+aws_s3() { aws s3 "${S3_ENDPOINT_ARGS[@]}" "$@"; }
+
 # ─── Preflight ───
 for cmd in vzdump pvesh aws; do
     command -v "$cmd" &>/dev/null || { fail "Missing: $cmd"; exit 1; }
 done
-aws s3 ls "${S3_BUCKET}" &>/dev/null || { fail "Cannot access ${S3_BUCKET}"; exit 1; }
-ok "S3 access verified"
+aws_s3 ls "${S3_BUCKET}" &>/dev/null || { fail "Cannot access ${S3_BUCKET}"; exit 1; }
+ok "S3 access verified${S3_ENDPOINT:+ (endpoint: $S3_ENDPOINT)}"
 
 # Clean old logs
 [[ "$LOG_RETENTION_DAYS" -gt 0 ]] && \
@@ -191,11 +199,11 @@ backup_host_network() {
     # Upload to S3
     local s3_dest="${S3_BUCKET}/${S3_PREFIX}/proxmox-host-config-${TIMESTAMP}.tar.gz"
     log "Uploading host config → ${s3_dest}"
-    aws s3 cp "$BUNDLE_FILE" "$s3_dest" --only-show-errors
+    aws_s3 cp "$BUNDLE_FILE" "$s3_dest" --only-show-errors
     ok "Host config uploaded to S3"
 
     # Verify
-    if aws s3 ls "$s3_dest" &>/dev/null; then
+    if aws_s3 ls "$s3_dest" &>/dev/null; then
         ok "S3 verify passed for host config"
     else
         warn "S3 verify failed for host config — keeping local"
@@ -524,7 +532,7 @@ upload_to_s3() {
     local s3_dest="${S3_BUCKET}/${S3_PREFIX}/${filename}"
     log "Uploading ${filename} (${filesize}) → ${s3_dest}"
     local start=$SECONDS
-    aws s3 cp "$filepath" "$s3_dest" --only-show-errors --expected-size "$(stat -c%s "$filepath")"
+    aws_s3 cp "$filepath" "$s3_dest" --only-show-errors --expected-size "$(stat -c%s "$filepath")"
     ok "Upload done for VMID ${vmid} in $(( SECONDS - start ))s"
 }
 
@@ -559,7 +567,7 @@ process_vm() {
     fi
 
     local fname; fname=$(basename "$backup_file")
-    if aws s3 ls "${S3_BUCKET}/${S3_PREFIX}/${fname}" &>/dev/null; then
+    if aws_s3 ls "${S3_BUCKET}/${S3_PREFIX}/${fname}" &>/dev/null; then
         ok "S3 verify OK for VMID ${vmid}"
     else
         warn "S3 verify FAILED for VMID ${vmid}"; FAILED+=("$vmid (verify)"); return 1
@@ -623,7 +631,7 @@ main() {
     log "════════════════════════════════════════════"
     log ""
     log "  TO RESTORE ON NEW PROXMOX:"
-    log "  1. aws s3 cp ${S3_BUCKET}/${S3_PREFIX}/ /tmp/restore/ --recursive"
+    log "  1. aws s3${S3_ENDPOINT:+ --endpoint-url $S3_ENDPOINT} cp ${S3_BUCKET}/${S3_PREFIX}/ /tmp/restore/ --recursive"
     log "  2. tar xzf /tmp/restore/proxmox-host-config-*.tar.gz -C /tmp/"
     log "  3. sudo bash /tmp/network-config-*/RESTORE.sh"
     log "  4. qmrestore /tmp/restore/vzdump-qemu-VMID-*.vma.zst VMID"
